@@ -66,7 +66,6 @@ pip install garminconnect oss2 urllib3 certifi
 | `GARMIN_EMAIL` | ⚠️ | Garmin 账号邮箱（无 2FA 时必须） |
 | `GARMIN_PASSWORD` | ⚠️ | Garmin 账号密码（无 2FA 时必须） |
 | `GARMIN_TOKEN_DATA` | ⚠️ | Garmin Token（2FA 用户或用 Token 登录时必须） |
-| `GARMIN_TOKEN_DIR` | ⚠️ | Garmin Token 目录（可选） |
 
 ### 认证方式（根据你的情况选择一种）
 
