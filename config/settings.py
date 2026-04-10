@@ -12,7 +12,6 @@ FIT_DIR = DATA_DIR / "fit"
 LOG_DIR = BASE_DIR / "logs"
 
 # Garmin settings
-GARMIN_TOKEN_DIR = os.getenv("GARMIN_TOKEN_DIR", str(Path.home() / ".garminconnect"))
 GARMIN_EMAIL = os.getenv("GARMIN_EMAIL", "")
 GARMIN_PASSWORD = os.getenv("GARMIN_PASSWORD", "")
 # Direct token JSON string (for GitHub Actions / 2FA users)

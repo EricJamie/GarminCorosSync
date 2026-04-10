@@ -21,7 +21,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from config.settings import (
     COROS_EMAIL, COROS_PASSWORD,
     GARMIN_EMAIL, GARMIN_PASSWORD, GARMIN_TOKEN_DATA,
-    GARMIN_TOKEN_DIR, FIT_DIR, NEWEST_NUM
+    FIT_DIR, NEWEST_NUM
 )
 from db.database import SyncDB
 from garmin.client import GarminClient
@@ -295,13 +295,11 @@ Examples:
 
     # Validate Garmin credentials
     has_token_data = bool(args.garmin_token_data and len(args.garmin_token_data) > 512)
-    token_dir_exists = Path(GARMIN_TOKEN_DIR).exists()
     has_email_password = bool(args.garmin_email and args.garmin_password)
-    has_garmin_auth = has_token_data or token_dir_exists or has_email_password
+    has_garmin_auth = has_token_data or has_email_password
     if not has_garmin_auth:
         logger.error("Garmin auth required. Set one of:")
-        logger.error("  - GARMIN_TOKEN_DATA: token JSON as string (for GitHub Actions / 2FA users)")
-        logger.error("  - GARMIN_TOKEN_DIR: path to ~/.garminconnect directory")
+        logger.error("  - GARMIN_TOKEN_DATA: token JSON as string (for 2FA users)")
         logger.error("  - GARMIN_EMAIL + GARMIN_PASSWORD: for non-2FA users")
         sys.exit(1)
 
@@ -313,7 +311,6 @@ Examples:
         garmin_client = GarminClient(
             email=args.garmin_email if args.garmin_email else None,
             password=args.garmin_password if args.garmin_password else None,
-            token_dir=GARMIN_TOKEN_DIR,
             token_data=args.garmin_token_data
         )
 

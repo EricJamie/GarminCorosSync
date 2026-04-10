@@ -8,7 +8,7 @@
 #   ./sync.sh --dry-run              # Preview without uploading
 #
 # Environment variables (from .env or shell):
-#   COROS_EMAIL, COROS_PASSWORD, GARMIN_TOKEN_DIR
+#   COROS_EMAIL, COROS_PASSWORD, GARMIN_TOKEN_DATA, GARMIN_EMAIL, GARMIN_PASSWORD
 
 set -e
 

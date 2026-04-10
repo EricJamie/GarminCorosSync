@@ -65,22 +65,21 @@ pip install garminconnect oss2 urllib3 certifi
 | `COROS_PASSWORD` | ✅ | Coros 账号密码 |
 | `GARMIN_EMAIL` | ⚠️ | Garmin 账号邮箱（无 2FA 时必须） |
 | `GARMIN_PASSWORD` | ⚠️ | Garmin 账号密码（无 2FA 时必须） |
-| `GARMIN_TOKEN_DATA` | ⚠️ | Garmin Token（2FA 用户或用 Token 登录时必须） |
+| `GARMIN_TOKEN_DATA` | ⚠️ | Garmin Token（2FA 用户必须） |
 
 ### 认证方式（根据你的情况选择一种）
 
-#### 方式一：Garmin 账号密码登录（无 2FA 用户推荐）
+#### 方式一：Garmin 账号密码登录（无 2FA 用户）
 
 直接填入 Garmin 账号和密码即可。
 
 #### 方式二：Garmin Token 登录（2FA 用户 或 遇到 429 的用户）
 
-1. 在本地电脑上运行一次同步脚本，让程序自动登录并获取 Token
-2. 找到 Token 文件：
+1. 找到 Token 文件：
    - **Windows**: `C:\Users\你的用户名\.garminconnect\数字\garmin_tokens.json`
    - **Mac/Linux**: `~/.garminconnect/数字/garmin_tokens.json`
-3. 打开文件，复制全部内容
-4. 把复制的内容作为 `GARMIN_TOKEN_DATA` 的值
+2. 打开文件，复制全部内容
+3. 把复制的内容作为 `GARMIN_TOKEN_DATA` 的值
 
 ---
 

@@ -5,7 +5,7 @@ import logging
 from pathlib import Path
 from typing import List, Optional
 
-from config.settings import GARMIN_TOKEN_DIR, GARMIN_EMAIL, GARMIN_PASSWORD, GARMIN_TOKEN_DATA
+from config.settings import GARMIN_EMAIL, GARMIN_PASSWORD, GARMIN_TOKEN_DATA
 
 logger = logging.getLogger(__name__)
 
@@ -14,43 +14,29 @@ class GarminClient:
     """Garmin Connect API client"""
 
     def __init__(self, email: str = None, password: str = None,
-                 token_dir: str = None, token_data: str = None):
+                 token_data: str = None):
         from garminconnect import Garmin
         self.Garmin = Garmin
         self.email = email if email is not None else GARMIN_EMAIL
         self.password = password if password is not None else GARMIN_PASSWORD
-        self.token_dir = token_dir or GARMIN_TOKEN_DIR
         self.token_data = token_data or GARMIN_TOKEN_DATA
         self.client = None
         self._connect()
 
     def _connect(self):
-        """Connect to Garmin - token string > token dir > email+password"""
+        """Connect to Garmin - token string > email+password"""
         from garminconnect import Garmin
 
         self.client = Garmin()
 
-        # Strategy 1: Direct token data string (best for GitHub Actions / 2FA users)
-        # If token_data is a long string (>512 chars), it's treated as token JSON content
+        # Strategy 1: Direct token data string (for 2FA users or GitHub Actions)
         if self.token_data and len(self.token_data) > 512:
-            logger.info("Logging in to Garmin with token data (direct string)")
+            logger.info("Logging in to Garmin with token data")
             self.client.login(self.token_data)
-            logger.info("Garmin login successful (token data)")
+            logger.info("Garmin login successful (token)")
             return
 
-        # Strategy 2: Token store directory
-        if self.token_dir:
-            token_path = Path(self.token_dir)
-            if token_path.exists():
-                subdirs = [d for d in token_path.iterdir() if d.is_dir() and d.name.isdigit()]
-                if subdirs:
-                    token_path = subdirs[0]
-                    logger.info(f"Logging in to Garmin with token: {token_path}")
-                    self.client.login(str(token_path))
-                    logger.info("Garmin login successful (token dir)")
-                    return
-
-        # Strategy 3: Email + password (for non-2FA users)
+        # Strategy 2: Email + password (for non-2FA users)
         if self.email and self.password:
             logger.info(f"Logging in to Garmin with email: {self.email}")
             self.client.login(self.email, self.password)
@@ -59,9 +45,8 @@ class GarminClient:
 
         raise ValueError(
             "Garmin login failed. Set one of:\n"
-            "  - GARMIN_TOKEN_DATA: entire token JSON as a string (for GitHub Actions)\n"
-            "  - GARMIN_TOKEN_DIR: path to ~/.garminconnect directory\n"
-            "  - GARMIN_EMAIL + GARMIN_PASSWORD: for non-2FA accounts"
+            "  - GARMIN_TOKEN_DATA: token JSON as string (for 2FA users)\n"
+            "  - GARMIN_EMAIL + GARMIN_PASSWORD: for non-2FA users"
         )
 
         profile = self.client.get_user_profile()

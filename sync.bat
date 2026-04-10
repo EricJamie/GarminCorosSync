@@ -8,7 +8,7 @@
 ::   sync.bat --dry-run      - Preview without uploading
 ::
 :: Environment variables (set in shell or .env):
-::   COROS_EMAIL, COROS_PASSWORD, GARMIN_TOKEN_DIR
+::   COROS_EMAIL, COROS_PASSWORD, GARMIN_TOKEN_DATA, GARMIN_EMAIL, GARMIN_PASSWORD
 
 setlocal enabledelayedexpansion
 
