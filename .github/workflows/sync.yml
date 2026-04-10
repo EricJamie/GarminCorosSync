@@ -1,0 +1,64 @@
+name: Garmin ⇄ Coros Sync
+
+on:
+  # Run daily at 07:30 UTC (15:30 Beijing time)
+  schedule:
+    - cron: '30 7 * * *'
+
+  # Allow manual trigger from GitHub Actions tab
+  workflow_dispatch:
+    inputs:
+      direction:
+        description: 'Sync direction'
+        required: false
+        default: 'both'
+        type: choice
+        options:
+          - both
+          - garmin-to-coros
+          - coros-to-garmin
+      dry_run:
+        description: 'Dry run (no actual upload)'
+        required: false
+        default: 'false'
+        type: boolean
+
+# Only allow one concurrent sync, cancel in-progress runs
+concurrency:
+  group: sync
+  cancel-in-progress: true
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install -q garminconnect oss2 urllib3 certifi
+
+      - name: Run sync
+        env:
+          COROS_EMAIL: ${{ secrets.COROS_EMAIL }}
+          COROS_PASSWORD: ${{ secrets.COROS_PASSWORD }}
+          GARMIN_TOKEN_DATA: ${{ secrets.GARMIN_TOKEN_DATA }}
+          GARMIN_EMAIL: ${{ secrets.GARMIN_EMAIL }}
+          GARMIN_PASSWORD: ${{ secrets.GARMIN_PASSWORD }}
+        run: |
+          if [ "${{ inputs.direction }}" == "garmin-to-coros" ]; then
+            python sync.py --coros-email "$COROS_EMAIL" --coros-password "$COROS_PASSWORD" --garmin-only
+          elif [ "${{ inputs.direction }}" == "coros-to-garmin" ]; then
+            python sync.py --coros-email "$COROS_EMAIL" --coros-password "$COROS_PASSWORD" --coros-only
+          elif [ "${{ inputs.dry_run }}" == "true" ]; then
+            python sync.py --coros-email "$COROS_EMAIL" --coros-password "$COROS_PASSWORD" --dry-run
+          else
+            python sync.py --coros-email "$COROS_EMAIL" --coros-password "$COROS_PASSWORD"
+          fi
