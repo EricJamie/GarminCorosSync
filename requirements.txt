@@ -3,6 +3,7 @@ garminconnect>=0.3.1
 curl_cffi>=0.15.0
 urllib3>=1.26.0
 certifi>=2023.0.0
+python-dotenv>=1.0.1
 
 # Coros OSS upload
 oss2>=2.18.0

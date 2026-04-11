@@ -1,19 +1,15 @@
 #!/usr/bin/env python3
 """
-Garmin ⇄ Coros Bidirectional Sync Tool
-
-Syncs activities between Garmin International and Coros:
-  - Garmin → Coros: download FIT from Garmin, upload to Coros
-  - Coros → Garmin: download FIT from Coros, import to Garmin
+Garmin <-> Coros bidirectional sync tool.
 """
 import argparse
 import logging
-import os
 import sys
 import time
-import tempfile
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from typing import Callable, Dict
 
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).parent))
@@ -26,6 +22,12 @@ from config.settings import (
 from db.database import SyncDB
 from garmin.client import GarminClient
 from coros.client import CorosClient
+from utils.platforms import (
+    DIRECTION_COROS_TO_GARMIN_INTL,
+    DIRECTION_GARMIN_INTL_TO_COROS,
+    PLATFORM_COROS,
+    PLATFORM_GARMIN_INTL,
+)
 
 # Setup logging
 logging.basicConfig(
@@ -36,6 +38,93 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class SyncDirectionPlan:
+    """One executable sync direction with fetch + sync steps."""
+
+    direction_key: str
+    source_platform: str
+    target_platform: str
+    fetch_func: Callable[..., int]
+    fetch_kwargs_factory: Callable[..., Dict]
+    sync_func: Callable[..., dict]
+    sync_kwargs_factory: Callable[..., Dict]
+    stats_func: Callable[[SyncDB], dict]
+    force_fetch_enabled: Callable[[argparse.Namespace], bool]
+    should_run: Callable[[argparse.Namespace], bool]
+    stats_label: str
+    result_label: str
+
+
+def _has_garmin_auth(args: argparse.Namespace) -> bool:
+    has_token_data = bool(args.garmin_token_data and len(args.garmin_token_data) > 32)
+    has_email_password = bool(args.garmin_email and args.garmin_password)
+    return has_token_data or has_email_password
+
+
+def _requires_coros_credentials(args: argparse.Namespace) -> bool:
+    return True
+
+
+def _log_final_summary(db: SyncDB):
+    logger.info("=" * 50)
+    logger.info(f"Garmin stats: {db.get_garmin_stats()}")
+    logger.info(f"Coros stats:  {db.get_coros_stats()}")
+    logger.info("Sync complete!")
+
+
+def _log_direction_run_summary(plan_runs):
+    """Log one compact summary line per executed direction."""
+    if not plan_runs:
+        return
+
+    logger.info("=" * 50)
+    logger.info("Direction summary:")
+    for run in plan_runs:
+        logger.info(
+            "%s fetched=%s synced=%s failed=%s skipped=%s",
+            run["direction_key"],
+            run["fetched"],
+            run["results"].get("synced", 0),
+            run["results"].get("failed", 0),
+            run["results"].get("skipped", 0),
+        )
+
+
+def _looks_like_duplicate(import_result) -> bool:
+    """Best-effort duplicate detection for loosely-defined platform responses."""
+    if import_result is None:
+        return False
+
+    if isinstance(import_result, dict):
+        values_to_check = [
+            import_result.get("status"),
+            import_result.get("message"),
+            import_result.get("error"),
+            import_result.get("code"),
+        ]
+        text = " ".join(str(v) for v in values_to_check if v is not None).lower()
+        return "duplicate" in text or "already" in text or "exists" in text
+
+    return "duplicate" in str(import_result).lower()
+
+
+def _looks_like_success(import_result) -> bool:
+    """Best-effort success detection for loosely-defined platform responses."""
+    if import_result is None:
+        return False
+
+    if isinstance(import_result, dict):
+        if import_result.get("success") is True:
+            return True
+        if str(import_result.get("status", "")).lower() in {"success", "ok", "200"}:
+            return True
+        if str(import_result.get("code", "")).lower() in {"0", "200"}:
+            return True
+
+    return not _looks_like_duplicate(import_result)
 
 
 # ─── Garmin → Coros ──────────────────────────────────────────────────────────
@@ -67,11 +156,11 @@ def fetch_garmin_activities(garmin_client: GarminClient, db: SyncDB,
 
 
 def sync_garmin_to_coros(garmin_client: GarminClient, coros_client: CorosClient,
-                          db: SyncDB, dry_run: bool = False) -> dict:
+                          db: SyncDB, dry_run: bool = False, limit: int = 100) -> dict:
     """Sync unsynced activities from Garmin to Coros"""
     results = {"synced": 0, "failed": 0, "skipped": 0}
 
-    unsynced = db.get_unsynced_garmin_activities(limit=100)
+    unsynced = db.get_unsynced_garmin_activities(limit=limit)
     logger.info(f"Found {len(unsynced)} Garmin activities to sync to Coros")
 
     if not unsynced:
@@ -82,6 +171,11 @@ def sync_garmin_to_coros(garmin_client: GarminClient, coros_client: CorosClient,
         logger.info(f"[Garmin→Coros] {activity_id} - {activity_name or 'Unknown'}")
 
         try:
+            if dry_run:
+                logger.info(f"[DRY RUN] Would upload Garmin activity {activity_id} to Coros")
+                results["skipped"] += 1
+                continue
+
             fit_data = garmin_client.download_fit(activity_id)
             if not fit_data:
                 logger.warning(f"Failed to download FIT for {activity_id}")
@@ -89,15 +183,17 @@ def sync_garmin_to_coros(garmin_client: GarminClient, coros_client: CorosClient,
                 results["failed"] += 1
                 continue
 
-            if dry_run:
-                logger.info(f"[DRY RUN] Would upload Garmin activity {activity_id} to Coros")
-                results["skipped"] += 1
-                continue
-
             success = coros_client.upload_activity(activity_id, fit_data)
 
             if success:
                 db.mark_garmin_synced(activity_id)
+                db.upsert_sync_mapping(
+                    PLATFORM_GARMIN_INTL,
+                    PLATFORM_COROS,
+                    str(activity_id),
+                    str(activity_id),
+                    "synced",
+                )
                 logger.info(f"[Garmin→Coros] Successfully synced {activity_id}")
                 results["synced"] += 1
             else:
@@ -148,11 +244,11 @@ def fetch_coros_activities(coros_client: CorosClient, db: SyncDB) -> int:
 
 
 def sync_coros_to_garmin(coros_client: CorosClient, garmin_client: GarminClient,
-                          db: SyncDB, dry_run: bool = False) -> dict:
+                          db: SyncDB, dry_run: bool = False, limit: int = 100) -> dict:
     """Sync unsynced activities from Coros to Garmin"""
     results = {"synced": 0, "failed": 0, "skipped": 0}
 
-    unsynced = db.get_unsynced_coros_activities(limit=100)
+    unsynced = db.get_unsynced_coros_activities(limit=limit)
     logger.info(f"Found {len(unsynced)} Coros activities to sync to Garmin")
 
     if not unsynced:
@@ -166,16 +262,16 @@ def sync_coros_to_garmin(coros_client: CorosClient, garmin_client: GarminClient,
         logger.info(f"[Coros→Garmin] {label_id} - {activity_name or 'Unknown'}")
 
         try:
+            if dry_run:
+                logger.info(f"[DRY RUN] Would upload Coros activity {label_id} to Garmin")
+                results["skipped"] += 1
+                continue
+
             fit_data = coros_client.download_activity(label_id, sport_type or 0)
             if not fit_data:
                 logger.warning(f"Failed to download FIT for Coros activity {label_id}")
                 db.mark_coros_sync_failed(label_id, -1)
                 results["failed"] += 1
-                continue
-
-            if dry_run:
-                logger.info(f"[DRY RUN] Would upload Coros activity {label_id} to Garmin")
-                results["skipped"] += 1
                 continue
 
             # Garmin's import_activity needs a file path - write to temp file
@@ -193,12 +289,26 @@ def sync_coros_to_garmin(coros_client: CorosClient, garmin_client: GarminClient,
                     failures = import_result["detailedImportResult"].get("failures", [])
                     if successes:
                         db.mark_coros_synced(label_id)
+                        db.upsert_sync_mapping(
+                            PLATFORM_COROS,
+                            PLATFORM_GARMIN_INTL,
+                            str(label_id),
+                            str(label_id),
+                            "synced",
+                        )
                         results["synced"] += 1
                         logger.info(f"[Coros→Garmin] Successfully synced {label_id}")
                     else:
                         # Check for duplicate - this is OK, means already in Garmin
                         if failures and any('DUPLICATE' in str(f) for f in failures):
-                            db.mark_coros_synced(label_id)
+                            db.mark_coros_duplicate(label_id)
+                            db.upsert_sync_mapping(
+                                PLATFORM_COROS,
+                                PLATFORM_GARMIN_INTL,
+                                str(label_id),
+                                str(label_id),
+                                "duplicate",
+                            )
                             results["synced"] += 1
                             logger.info(f"[Coros→Garmin] Duplicate activity {label_id} - already in Garmin")
                         else:
@@ -207,6 +317,13 @@ def sync_coros_to_garmin(coros_client: CorosClient, garmin_client: GarminClient,
                             results["failed"] += 1
                 else:
                     db.mark_coros_synced(label_id)
+                    db.upsert_sync_mapping(
+                        PLATFORM_COROS,
+                        PLATFORM_GARMIN_INTL,
+                        str(label_id),
+                        str(label_id),
+                        "synced",
+                    )
                     results["synced"] += 1
             finally:
                 # Clean up temp file
@@ -217,7 +334,14 @@ def sync_coros_to_garmin(coros_client: CorosClient, garmin_client: GarminClient,
             error_str = str(e)
             # Handle duplicate activity error (HTTP 409)
             if 'Duplicate' in error_str or 'duplicate' in error_str:
-                db.mark_coros_synced(label_id)
+                db.mark_coros_duplicate(label_id)
+                db.upsert_sync_mapping(
+                    PLATFORM_COROS,
+                    PLATFORM_GARMIN_INTL,
+                    str(label_id),
+                    str(label_id),
+                    "duplicate",
+                )
                 results["synced"] += 1
                 logger.info(f"[Coros→Garmin] Duplicate activity {label_id} - already in Garmin")
             else:
@@ -230,11 +354,93 @@ def sync_coros_to_garmin(coros_client: CorosClient, garmin_client: GarminClient,
     return results
 
 
+def get_sync_plans(args: argparse.Namespace):
+    """Return enabled direction plans for the current run."""
+    plans = [
+        SyncDirectionPlan(
+            direction_key=DIRECTION_GARMIN_INTL_TO_COROS,
+            source_platform=PLATFORM_GARMIN_INTL,
+            target_platform=PLATFORM_COROS,
+            fetch_func=fetch_garmin_activities,
+            fetch_kwargs_factory=lambda runtime: {
+                "garmin_client": runtime["garmin_client"],
+                "db": runtime["db"],
+                "newest_num": runtime["args"].newest,
+            },
+            sync_func=sync_garmin_to_coros,
+            sync_kwargs_factory=lambda runtime: {
+                "garmin_client": runtime["garmin_client"],
+                "coros_client": runtime["coros_client"],
+                "db": runtime["db"],
+                "dry_run": runtime["args"].dry_run,
+                "limit": runtime["args"].newest,
+            },
+            stats_func=lambda db: db.get_garmin_stats(),
+            force_fetch_enabled=lambda parsed_args: parsed_args.force_fetch_garmin,
+            should_run=lambda parsed_args: not parsed_args.coros_only,
+            stats_label="Garmin DB",
+            result_label="[Garmin->Coros]",
+        ),
+        SyncDirectionPlan(
+            direction_key=DIRECTION_COROS_TO_GARMIN_INTL,
+            source_platform=PLATFORM_COROS,
+            target_platform=PLATFORM_GARMIN_INTL,
+            fetch_func=fetch_coros_activities,
+            fetch_kwargs_factory=lambda runtime: {
+                "coros_client": runtime["coros_client"],
+                "db": runtime["db"],
+            },
+            sync_func=sync_coros_to_garmin,
+            sync_kwargs_factory=lambda runtime: {
+                "coros_client": runtime["coros_client"],
+                "garmin_client": runtime["garmin_client"],
+                "db": runtime["db"],
+                "dry_run": runtime["args"].dry_run,
+                "limit": runtime["args"].newest,
+            },
+            stats_func=lambda db: db.get_coros_stats(),
+            force_fetch_enabled=lambda parsed_args: parsed_args.force_fetch_coros,
+            should_run=lambda parsed_args: not parsed_args.garmin_only,
+            stats_label="Coros DB",
+            result_label="[Coros->Garmin]",
+        ),
+    ]
+    return plans
+
+
+def run_sync_plan(plan: SyncDirectionPlan, runtime: Dict) -> dict:
+    """Execute fetch + sync for one direction plan."""
+    args = runtime["args"]
+
+    if plan.force_fetch_enabled(args):
+        logger.info(f"Force fetching {plan.source_platform} activities before sync")
+
+    fetched = plan.fetch_func(**plan.fetch_kwargs_factory(runtime))
+    stats = plan.stats_func(runtime["db"])
+    logger.info(
+        f"{plan.stats_label}: {stats['total']} total, "
+        f"{stats['synced']} synced, {stats['unsynced']} unsynced, "
+        f"{stats['pending']} pending, {stats['duplicate']} duplicate, "
+        f"{stats['failed_retryable']} retryable-failed"
+    )
+
+    results = plan.sync_func(**plan.sync_kwargs_factory(runtime))
+    if args.dry_run:
+        logger.info(f"{plan.result_label} DRY RUN: fetched={fetched}, results={results}")
+    else:
+        logger.info(f"{plan.result_label} fetched={fetched}, results={results}")
+    return {
+        "direction_key": plan.direction_key,
+        "fetched": fetched,
+        "results": results,
+    }
+
+
 # ─── Main ────────────────────────────────────────────────────────────────────
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Garmin ⇄ Coros Bidirectional Sync Tool",
+        description="Garmin <-> Coros Bidirectional Sync Tool",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -244,10 +450,10 @@ Examples:
   # With Garmin token directory (for 2FA users)
   python sync.py --coros-email "..." --coros-password "..." --garmin-email "..."
 
-  # Only Garmin → Coros
+  # Only Garmin -> Coros
   python sync.py --coros-email "..." --coros-password "..." --garmin-only
 
-  # Only Coros → Garmin
+  # Only Coros -> Garmin
   python sync.py --coros-email "..." --coros-password "..." --coros-only
 
   # Dry run first
@@ -272,32 +478,28 @@ Examples:
                         help="Force re-fetch activities from Garmin")
     parser.add_argument("--force-fetch-coros", action="store_true",
                         help="Force re-fetch activities from Coros")
-
     # Sync direction flags
     dir_group = parser.add_mutually_exclusive_group()
     dir_group.add_argument("--garmin-only", action="store_true",
-                           help="Only sync Garmin → Coros")
+                           help="Only sync Garmin -> Coros")
     dir_group.add_argument("--coros-only", action="store_true",
-                           help="Only sync Coros → Garmin")
+                           help="Only sync Coros -> Garmin")
 
     args = parser.parse_args()
 
     logger.info("=" * 50)
-    logger.info("Garmin ⇄ Coros Sync Tool")
+    logger.info("Garmin <-> Coros Sync Tool")
     logger.info("=" * 50)
 
-    # Validate Coros credentials
-    if not args.coros_email or not args.coros_password:
+    # Validate Coros credentials only if Coros directions will run.
+    if _requires_coros_credentials(args) and (not args.coros_email or not args.coros_password):
         logger.error("Coros email and password are required")
         logger.error("Set COROS_EMAIL and COROS_PASSWORD environment variables")
         logger.error("Or use --coros-email and --coros-password arguments")
         sys.exit(1)
 
     # Validate Garmin credentials
-    has_token_data = bool(args.garmin_token_data and len(args.garmin_token_data) > 512)
-    has_email_password = bool(args.garmin_email and args.garmin_password)
-    has_garmin_auth = has_token_data or has_email_password
-    if not has_garmin_auth:
+    if not _has_garmin_auth(args):
         logger.error("Garmin auth required. Set one of:")
         logger.error("  - GARMIN_TOKEN_DATA: token JSON as string (for 2FA users)")
         logger.error("  - GARMIN_EMAIL + GARMIN_PASSWORD: for non-2FA users")
@@ -314,47 +516,23 @@ Examples:
             token_data=args.garmin_token_data
         )
 
-        # Connect to Coros
         logger.info("Connecting to Coros...")
         coros_client = CorosClient(args.coros_email, args.coros_password)
 
-        # ─── Garmin → Coros ────────────────────────────────────────────────
-        if not args.coros_only:
-            if args.force_fetch_garmin:
-                fetch_garmin_activities(garmin_client, db, args.newest)
+        runtime = {
+            "args": args,
+            "db": db,
+            "garmin_client": garmin_client,
+            "coros_client": coros_client,
+        }
 
-            garmin_stats = db.get_garmin_stats()
-            logger.info(f"Garmin DB: {garmin_stats['total']} total, "
-                        f"{garmin_stats['synced']} synced, {garmin_stats['unsynced']} unsynced")
+        plan_runs = []
+        for plan in get_sync_plans(args):
+            if plan.should_run(args):
+                plan_runs.append(run_sync_plan(plan, runtime))
 
-            if not args.dry_run:
-                results = sync_garmin_to_coros(garmin_client, coros_client, db, args.dry_run)
-                logger.info(f"[Garmin→Coros] {results}")
-            else:
-                results = sync_garmin_to_coros(garmin_client, coros_client, db, dry_run=True)
-                logger.info(f"[Garmin→Coros] DRY RUN: {results}")
-
-        # ─── Coros → Garmin ────────────────────────────────────────────────
-        if not args.garmin_only:
-            if args.force_fetch_coros:
-                fetch_coros_activities(coros_client, db)
-
-            coros_stats = db.get_coros_stats()
-            logger.info(f"Coros DB: {coros_stats['total']} total, "
-                        f"{coros_stats['synced']} synced, {coros_stats['unsynced']} unsynced")
-
-            if not args.dry_run:
-                results = sync_coros_to_garmin(coros_client, garmin_client, db, args.dry_run)
-                logger.info(f"[Coros→Garmin] {results}")
-            else:
-                results = sync_coros_to_garmin(coros_client, garmin_client, db, dry_run=True)
-                logger.info(f"[Coros→Garmin] DRY RUN: {results}")
-
-        # Final stats
-        logger.info("=" * 50)
-        logger.info(f"Garmin stats: {db.get_garmin_stats()}")
-        logger.info(f"Coros stats:  {db.get_coros_stats()}")
-        logger.info("Sync complete!")
+        _log_direction_run_summary(plan_runs)
+        _log_final_summary(db)
 
     except Exception as e:
         logger.error(f"Sync failed: {e}")

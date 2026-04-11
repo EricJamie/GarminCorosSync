@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+
+data/db/
+data/fit/
+
+docs/
+private_docs/
+tests/_tmp/
+tests/_tmp/
