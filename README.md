@@ -19,6 +19,20 @@
 - `COROS_PASSWORD`
 - `GARMIN_NEWEST_NUM`
 
+Garmin 推荐优先使用 token 方式：
+
+- `GARMIN_TOKEN_DATA`
+  直接提供完整的 token JSON 字符串，也就是 `garmin_tokens.json` 文件里的内容本身。
+  适合放在 GitHub Secrets 或环境变量中。
+- `GARMIN_TOKENSTORE`
+  提供本地 `garmin_tokens.json` 文件路径。
+  适合本地运行或服务器定时任务。
+
+如果两者都没有，再回退到：
+
+- `GARMIN_EMAIL`
+- `GARMIN_PASSWORD`
+
 配置优先级：
 1. 命令行参数
 2. 环境变量
@@ -62,18 +76,12 @@ python sync.py --dry-run
 python sync.py --dry-run --garmin-only --newest 3 --coros-email "..." --coros-password "..."
 ```
 
-## 当前结论
+## 使用建议
 
-- Garmin 国际区支持 tokenstore 优先复用
-- Garmin token / tokenstore 失效时，如果同时配置了账号密码，会自动回退账号密码并重新写入 tokenstore
-- Garmin token / tokenstore 失效会被单独识别并输出更明确的日志，便于判断是否需要刷新 token
-- 提供 `scripts/refresh_garmin_token.py`，可单独刷新或获取 Garmin tokenstore / token JSON
-- `--newest` 现在同时限制抓取和同步阶段的候选数量
-- `--dry-run` 现在只预演将要同步的活动，不再下载 FIT 文件
-- Coros 双向主流程保留
-- 当前仓库默认只公开运行所需说明；开发计划、验收、交接等过程文档建议保留在本地，不随公开仓库提交
-- 项目目标是支持无交互自动化运行，适用于服务器定时任务和 GitHub Actions
-- 对启用 2FA 的 Garmin 账号，长期目标是通过 tokenstore 刷新/更新维持运行，而不是反复人工输入验证码
+- 日常运行建议优先使用 `GARMIN_TOKENSTORE` 或 `GARMIN_TOKEN_DATA`
+- 对启用 2FA 的 Garmin 账号，建议先用 `scripts/refresh_garmin_token.py` 获取或更新 token
+- 首次同步记录很多时，建议先配合 `--newest` 和 `--dry-run` 小范围验证
+- `--dry-run` 只预演将要同步的活动，不会真正上传到目标平台
 
 ## 常见问题
 
@@ -106,6 +114,22 @@ python scripts/refresh_garmin_token.py --garmin-email you@example.com --garmin-p
 
 ```bash
 python scripts/refresh_garmin_token.py --garmin-email you@example.com --garmin-password your-password --print-token-data
+```
+
+两者关系：
+
+- `GARMIN_TOKENSTORE` 是磁盘上的 `garmin_tokens.json` 文件路径
+- `GARMIN_TOKEN_DATA` 是这个 `garmin_tokens.json` 文件内容本身的 JSON 字符串形式
+
+可以简单理解为：
+
+- 本地/服务器更适合 `GARMIN_TOKENSTORE`
+- GitHub Actions 更适合 `GARMIN_TOKEN_DATA`
+
+示例：
+
+```env
+GARMIN_TOKENSTORE=C:\Users\yourname\.garminconnect\default\garmin_tokens.json
 ```
 
 ### Coros 登录失败
