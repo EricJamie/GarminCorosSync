@@ -15,8 +15,27 @@ on:
         type: choice
         options:
           - both
-          - garmin-to-coros
-          - coros-to-garmin
+          - garmin_only
+          - coros_only
+      since:
+        description: 'Only sync activities on or after this date (YYYYMMDD or YYYY-MM-DD)'
+        required: false
+        default: ''
+        type: string
+      window_mode:
+        description: 'How to choose records after date filtering'
+        required: false
+        default: 'default'
+        type: choice
+        options:
+          - default
+          - newest
+          - earliest
+      window_size:
+        description: 'Window size used when window_mode is newest or earliest'
+        required: false
+        default: ''
+        type: string
       dry_run:
         description: 'Dry run (no actual upload)'
         required: false
@@ -43,7 +62,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install -q garminconnect oss2 urllib3 certifi
+          pip install -q -r requirements.txt
 
       - name: Run sync
         env:
@@ -52,13 +71,41 @@ jobs:
           GARMIN_TOKEN_DATA: ${{ secrets.GARMIN_TOKEN_DATA }}
           GARMIN_EMAIL: ${{ secrets.GARMIN_EMAIL }}
           GARMIN_PASSWORD: ${{ secrets.GARMIN_PASSWORD }}
+          INPUT_DIRECTION: ${{ inputs.direction }}
+          INPUT_SINCE: ${{ inputs.since }}
+          INPUT_WINDOW_MODE: ${{ inputs.window_mode }}
+          INPUT_WINDOW_SIZE: ${{ inputs.window_size }}
+          INPUT_DRY_RUN: ${{ inputs.dry_run }}
         run: |
-          if [ "${{ inputs.direction }}" == "garmin-to-coros" ]; then
-            python sync.py --coros-email "$COROS_EMAIL" --coros-password "$COROS_PASSWORD" --garmin-only
-          elif [ "${{ inputs.direction }}" == "coros-to-garmin" ]; then
-            python sync.py --coros-email "$COROS_EMAIL" --coros-password "$COROS_PASSWORD" --coros-only
-          elif [ "${{ inputs.dry_run }}" == "true" ]; then
-            python sync.py --coros-email "$COROS_EMAIL" --coros-password "$COROS_PASSWORD" --dry-run
-          else
-            python sync.py --coros-email "$COROS_EMAIL" --coros-password "$COROS_PASSWORD"
+          set -eu
+
+          DIRECTION="${INPUT_DIRECTION:-both}"
+          SINCE="${INPUT_SINCE:-}"
+          WINDOW_MODE="${INPUT_WINDOW_MODE:-default}"
+          WINDOW_SIZE="${INPUT_WINDOW_SIZE:-}"
+          DRY_RUN="${INPUT_DRY_RUN:-false}"
+
+          ARGS=(--coros-email "$COROS_EMAIL" --coros-password "$COROS_PASSWORD")
+
+          if [ "$DIRECTION" = "garmin_only" ]; then
+            ARGS+=(--garmin-only)
+          elif [ "$DIRECTION" = "coros_only" ]; then
+            ARGS+=(--coros-only)
           fi
+
+          if [ -n "$SINCE" ]; then
+            ARGS+=(--since "$SINCE")
+          fi
+
+          if [ "$WINDOW_MODE" = "newest" ] && [ -n "$WINDOW_SIZE" ]; then
+            ARGS+=(--newest "$WINDOW_SIZE")
+          elif [ "$WINDOW_MODE" = "earliest" ] && [ -n "$WINDOW_SIZE" ]; then
+            ARGS+=(--earliest "$WINDOW_SIZE")
+          fi
+
+          if [ "$DRY_RUN" = "true" ]; then
+            ARGS+=(--dry-run)
+          fi
+
+          echo "Running: python sync.py ${ARGS[*]}"
+          python sync.py "${ARGS[@]}"

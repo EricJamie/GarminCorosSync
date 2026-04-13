@@ -21,7 +21,6 @@ GARMIN_EMAIL = os.getenv("GARMIN_EMAIL", "")
 GARMIN_PASSWORD = os.getenv("GARMIN_PASSWORD", "")
 # Direct token JSON string (for GitHub Actions / 2FA users)
 GARMIN_TOKEN_DATA = os.getenv("GARMIN_TOKEN_DATA", "")
-GARMIN_TOKENSTORE = os.getenv("GARMIN_TOKENSTORE", "")
 
 # Coros settings
 COROS_EMAIL = os.getenv("COROS_EMAIL", "")

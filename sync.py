@@ -7,9 +7,9 @@ import logging
 import sys
 import time
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
-from typing import Callable, Dict
+from typing import Callable, Dict, Optional
 
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).parent))
@@ -66,6 +66,52 @@ def _has_garmin_auth(args: argparse.Namespace) -> bool:
 
 def _requires_coros_credentials(args: argparse.Namespace) -> bool:
     return True
+
+
+def _parse_since_date(value: Optional[str]) -> Optional[date]:
+    """Parse YYYYMMDD or YYYY-MM-DD into a date object."""
+    if not value:
+        return None
+
+    for fmt in ("%Y%m%d", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(value, fmt).date()
+        except ValueError:
+            continue
+
+    raise argparse.ArgumentTypeError(
+        f"Invalid --since value '{value}'. Use YYYYMMDD or YYYY-MM-DD."
+    )
+
+
+def _activity_is_on_or_after(start_time: str, since: Optional[date]) -> bool:
+    """Return True when an activity timestamp is on/after the since date."""
+    if since is None:
+        return True
+    if not start_time:
+        return False
+
+    normalized = str(start_time).strip().replace("T", " ")
+    date_part = normalized[:10]
+    try:
+        return datetime.strptime(date_part, "%Y-%m-%d").date() >= since
+    except ValueError:
+        return False
+
+
+def _select_window(rows, since: Optional[date], newest: Optional[int] = None, earliest: Optional[int] = None):
+    """Filter by since-date, then choose either newest-N or earliest-N rows."""
+    filtered = [row for row in rows if _activity_is_on_or_after(row[2], since)]
+
+    if earliest is not None:
+        filtered = sorted(filtered, key=lambda row: row[2] or "")
+        return filtered[:earliest]
+
+    if newest is not None:
+        filtered = sorted(filtered, key=lambda row: row[2] or "", reverse=True)
+        return filtered[:newest]
+
+    return filtered
 
 
 def _log_final_summary(db: SyncDB):
@@ -130,7 +176,7 @@ def _looks_like_success(import_result) -> bool:
 # ─── Garmin → Coros ──────────────────────────────────────────────────────────
 
 def fetch_garmin_activities(garmin_client: GarminClient, db: SyncDB,
-                            newest_num: int = 1000) -> int:
+                            newest_num: int = 1000, since: Optional[date] = None) -> int:
     """Fetch activities from Garmin and save to database"""
     logger.info(f"Fetching latest {newest_num} activities from Garmin...")
 
@@ -145,6 +191,9 @@ def fetch_garmin_activities(garmin_client: GarminClient, db: SyncDB,
             start_time = activity.get("startTimeLocal", "")
             sport_type = activity.get("sportTypeKey", "")
 
+            if not _activity_is_on_or_after(start_time, since):
+                continue
+
             if db.save_garmin_activity(activity_id, activity_name, start_time, sport_type):
                 saved_count += 1
 
@@ -156,11 +205,18 @@ def fetch_garmin_activities(garmin_client: GarminClient, db: SyncDB,
 
 
 def sync_garmin_to_coros(garmin_client: GarminClient, coros_client: CorosClient,
-                          db: SyncDB, dry_run: bool = False, limit: int = 100) -> dict:
+                          db: SyncDB, dry_run: bool = False, limit: int = 100,
+                          since: Optional[date] = None,
+                          earliest: Optional[int] = None) -> dict:
     """Sync unsynced activities from Garmin to Coros"""
     results = {"synced": 0, "failed": 0, "skipped": 0}
 
-    unsynced = db.get_unsynced_garmin_activities(limit=limit)
+    unsynced = _select_window(
+        db.get_unsynced_garmin_activities(limit=max(limit, earliest or 0)),
+        since=since,
+        newest=None if earliest is not None else limit,
+        earliest=earliest,
+    )
     logger.info(f"Found {len(unsynced)} Garmin activities to sync to Coros")
 
     if not unsynced:
@@ -213,7 +269,7 @@ def sync_garmin_to_coros(garmin_client: GarminClient, coros_client: CorosClient,
 
 # ─── Coros → Garmin ──────────────────────────────────────────────────────────
 
-def fetch_coros_activities(coros_client: CorosClient, db: SyncDB) -> int:
+def fetch_coros_activities(coros_client: CorosClient, db: SyncDB, since: Optional[date] = None) -> int:
     """Fetch activities from Coros and save to database"""
     logger.info("Fetching all activities from Coros...")
 
@@ -233,6 +289,9 @@ def fetch_coros_activities(coros_client: CorosClient, db: SyncDB) -> int:
                 start_time = str(activity.get("date", ""))
             sport_type = activity.get("sportType", 0)
 
+            if not _activity_is_on_or_after(start_time, since):
+                continue
+
             if db.save_coros_activity(label_id, activity_name, start_time, sport_type):
                 saved_count += 1
 
@@ -244,11 +303,18 @@ def fetch_coros_activities(coros_client: CorosClient, db: SyncDB) -> int:
 
 
 def sync_coros_to_garmin(coros_client: CorosClient, garmin_client: GarminClient,
-                          db: SyncDB, dry_run: bool = False, limit: int = 100) -> dict:
+                          db: SyncDB, dry_run: bool = False, limit: int = 100,
+                          since: Optional[date] = None,
+                          earliest: Optional[int] = None) -> dict:
     """Sync unsynced activities from Coros to Garmin"""
     results = {"synced": 0, "failed": 0, "skipped": 0}
 
-    unsynced = db.get_unsynced_coros_activities(limit=limit)
+    unsynced = _select_window(
+        db.get_unsynced_coros_activities(limit=max(limit, earliest or 0)),
+        since=since,
+        newest=None if earliest is not None else limit,
+        earliest=earliest,
+    )
     logger.info(f"Found {len(unsynced)} Coros activities to sync to Garmin")
 
     if not unsynced:
@@ -366,6 +432,7 @@ def get_sync_plans(args: argparse.Namespace):
                 "garmin_client": runtime["garmin_client"],
                 "db": runtime["db"],
                 "newest_num": runtime["args"].newest,
+                "since": runtime["args"].since,
             },
             sync_func=sync_garmin_to_coros,
             sync_kwargs_factory=lambda runtime: {
@@ -374,6 +441,8 @@ def get_sync_plans(args: argparse.Namespace):
                 "db": runtime["db"],
                 "dry_run": runtime["args"].dry_run,
                 "limit": runtime["args"].newest,
+                "since": runtime["args"].since,
+                "earliest": runtime["args"].earliest,
             },
             stats_func=lambda db: db.get_garmin_stats(),
             force_fetch_enabled=lambda parsed_args: parsed_args.force_fetch_garmin,
@@ -389,6 +458,7 @@ def get_sync_plans(args: argparse.Namespace):
             fetch_kwargs_factory=lambda runtime: {
                 "coros_client": runtime["coros_client"],
                 "db": runtime["db"],
+                "since": runtime["args"].since,
             },
             sync_func=sync_coros_to_garmin,
             sync_kwargs_factory=lambda runtime: {
@@ -397,6 +467,8 @@ def get_sync_plans(args: argparse.Namespace):
                 "db": runtime["db"],
                 "dry_run": runtime["args"].dry_run,
                 "limit": runtime["args"].newest,
+                "since": runtime["args"].since,
+                "earliest": runtime["args"].earliest,
             },
             stats_func=lambda db: db.get_coros_stats(),
             force_fetch_enabled=lambda parsed_args: parsed_args.force_fetch_coros,
@@ -447,8 +519,8 @@ Examples:
   # Full bidirectional sync
   python sync.py --coros-email "..." --coros-password "..."
 
-  # With Garmin token directory (for 2FA users)
-  python sync.py --coros-email "..." --coros-password "..." --garmin-email "..."
+  # With Garmin token data (for 2FA users)
+  python sync.py --coros-email "..." --coros-password "..." --garmin-token-data "..."
 
   # Only Garmin -> Coros
   python sync.py --coros-email "..." --coros-password "..." --garmin-only
@@ -462,14 +534,19 @@ Examples:
     )
     parser.add_argument("--dry-run", action="store_true",
                         help="Show what would be synced without uploading")
-    parser.add_argument("--newest", type=int, default=NEWEST_NUM,
-                        help=f"Number of latest Garmin activities to fetch (default: {NEWEST_NUM})")
+    window_group = parser.add_mutually_exclusive_group()
+    window_group.add_argument("--newest", type=int, default=NEWEST_NUM,
+                              help=f"Number of newest activities to sync after filtering (default: {NEWEST_NUM})")
+    window_group.add_argument("--earliest", type=int, default=None,
+                              help="Number of earliest activities to sync after filtering")
+    parser.add_argument("--since", type=_parse_since_date, default=None,
+                        help="Only sync activities on or after this date (YYYYMMDD or YYYY-MM-DD)")
     parser.add_argument("--coros-email", default=COROS_EMAIL,
                         help="Coros account email")
     parser.add_argument("--coros-password", default=COROS_PASSWORD,
                         help="Coros account password")
     parser.add_argument("--garmin-token-data", default=GARMIN_TOKEN_DATA,
-                        help="Full garmin_tokens.json content as string (for GitHub Actions / 2FA users)")
+                        help="Full Garmin token JSON content as string (recommended for GitHub Actions / 2FA users)")
     parser.add_argument("--garmin-email", default=GARMIN_EMAIL,
                         help="Garmin account email (for non-2FA users or as account identifier)")
     parser.add_argument("--garmin-password", default=GARMIN_PASSWORD,
@@ -513,7 +590,7 @@ Examples:
         garmin_client = GarminClient(
             email=args.garmin_email if args.garmin_email else None,
             password=args.garmin_password if args.garmin_password else None,
-            token_data=args.garmin_token_data
+            token_data=args.garmin_token_data,
         )
 
         logger.info("Connecting to Coros...")

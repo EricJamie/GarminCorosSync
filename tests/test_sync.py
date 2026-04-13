@@ -5,7 +5,10 @@ from uuid import uuid4
 
 from db.database import SyncDB
 from sync import (
+    _parse_since_date,
     _requires_coros_credentials,
+    _activity_is_on_or_after,
+    _select_window,
     get_sync_plans,
     run_sync_plan,
     sync_coros_to_garmin,
@@ -100,6 +103,42 @@ class SyncFlowTestCase(unittest.TestCase):
         self.assertEqual(result, {"synced": 0, "failed": 0, "skipped": 1})
         self.assertEqual(coros_client.download_calls, [])
 
+    def test_garmin_to_coros_since_filter_skips_older_records(self):
+        self.db.save_garmin_activity(5001, "Old Run", "2025-03-29 09:00:00", "running")
+        self.db.save_garmin_activity(5002, "New Run", "2025-03-30 09:00:00", "running")
+        garmin_client = FakeGarminClient()
+        coros_client = FakeCorosClient()
+
+        with mock.patch("sync.time.sleep", return_value=None):
+            result = sync_garmin_to_coros(
+                garmin_client,
+                coros_client,
+                self.db,
+                dry_run=True,
+                limit=10,
+                since=_parse_since_date("20250330"),
+            )
+
+        self.assertEqual(result, {"synced": 0, "failed": 0, "skipped": 1})
+
+    def test_coros_to_garmin_since_filter_skips_older_records(self):
+        self.db.save_coros_activity("old", "Old Ride", "2025-03-29 09:00:00", 1)
+        self.db.save_coros_activity("new", "New Ride", "2025-03-30 09:00:00", 1)
+        coros_client = FakeCorosClient(fit_data=b"fit-data")
+        garmin_client = FakeGarminClient()
+
+        with mock.patch("sync.time.sleep", return_value=None):
+            result = sync_coros_to_garmin(
+                coros_client,
+                garmin_client,
+                self.db,
+                dry_run=True,
+                limit=10,
+                since=_parse_since_date("2025-03-30"),
+            )
+
+        self.assertEqual(result, {"synced": 0, "failed": 0, "skipped": 1})
+
     def test_coros_to_garmin_success_writes_mapping(self):
         self.db.save_coros_activity("c2", "Run", "2026-01-01 09:00:00", 1)
 
@@ -147,6 +186,32 @@ class SyncFlowTestCase(unittest.TestCase):
         default_args = type("Args", (), {})()
         self.assertTrue(_requires_coros_credentials(default_args))
 
+    def test_since_date_parser_accepts_both_formats(self):
+        self.assertEqual(str(_parse_since_date("20250330")), "2025-03-30")
+        self.assertEqual(str(_parse_since_date("2025-03-30")), "2025-03-30")
+
+    def test_activity_since_helper_filters_by_date(self):
+        since = _parse_since_date("20250330")
+        self.assertTrue(_activity_is_on_or_after("2025-03-30 00:00:00", since))
+        self.assertTrue(_activity_is_on_or_after("2025-04-01 10:00:00", since))
+        self.assertFalse(_activity_is_on_or_after("2025-03-29 23:59:59", since))
+
+    def test_select_window_can_choose_earliest_after_since(self):
+        rows = [
+            ("id3", "Run 3", "2025-04-01 09:00:00", "running"),
+            ("id2", "Run 2", "2025-03-31 09:00:00", "running"),
+            ("id1", "Run 1", "2025-03-30 09:00:00", "running"),
+            ("old", "Old Run", "2025-03-29 09:00:00", "running"),
+        ]
+
+        selected = _select_window(
+            rows,
+            since=_parse_since_date("20250330"),
+            earliest=2,
+        )
+
+        self.assertEqual([row[0] for row in selected], ["id1", "id2"])
+
     def test_run_sync_plan_returns_direction_summary_payload(self):
         plan = SimpleNamespace(
             direction_key=DIRECTION_GARMIN_INTL_TO_COROS,
@@ -160,7 +225,7 @@ class SyncFlowTestCase(unittest.TestCase):
             result_label="[Garmin->Coros]",
         )
         runtime = {
-            "args": type("Args", (), {"dry_run": True})(),
+            "args": type("Args", (), {"dry_run": True, "since": None})(),
             "db": self.db,
         }
 
